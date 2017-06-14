@@ -1,4 +1,4 @@
-# 1 - Music Clustering Intro
+# Music Clustering Intro
 ## Yello
 Yello. My name is Chi, and this is my second set of posts on this blog. In my first post about basketball, I go into a bit of an intro of myself. I won't rehash everything, but maybe a small intro will help again. First of all, I work as an IT consultant by day and play a lot of basketball and listen to a lot of music by night. Honestly, that pretty much sums this blog up to now haha.
 
@@ -7,8 +7,6 @@ The short of it is that I'm trying to learn a bit more about this zoo of a world
 ![](https://i.makeagif.com/media/9-28-2015/H8PLvc.gif)
 
 I generally help clients with date warehousing / basic dashboarding needs - Rarely have I actually tried to implement some type of model before, but I have to get my practice from somewhere! Why not start with my own interests? My objective throughout my first blog post so far has simply been _**try to learn something more than you knew before, about basketball or about data science**_. Again, the data science world is messy... What the hell is data science even? Even the word data science just makes you want to cringe these days.
-
-![](http://gifrific.com/wp-content/uploads/2015/02/Britney-Spears-Cringe-Face.gif)
 
 ## Data Science
 I've been called a data scientist at work, and I immediately felt inept and that I was being extremely oversold. There are people out there using millions of users data to predict traffic patterns, or developing algorithms for image recognition, or predicting which movies you'd like to watch next while I sit here and write extremely simple SQL statements and pipe it into a Tableau graph... I mean, you can't _**help**_ but think "what am I? Sure as hell not a data scientist!".
