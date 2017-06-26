@@ -1,7 +1,9 @@
-import psutil
+list = [1, 2, 3, 4]
 
-print psutil.cpu_percent()
-print psutil.cpu_count()
+list_2 = []
+for x in list:
+    list_2.append(x*2)
 
-print psutil.virtual_memory()[2]
-print psutil.disk_partitions()
+list_2 = [x * 2 for x in list]
+
+print list_2

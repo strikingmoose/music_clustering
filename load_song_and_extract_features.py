@@ -1,8 +1,8 @@
 # This script loops through my iTunes library and performs the following for each song and saves overall results in
-#   a file on S3
+#   a csv file in the project root directory
 #       - Loads each mp3
 #       - Extracts features
-#           - Extracts the first 15 sets of MFCC coefficients
+#           - Extracts a set amount of MFCCs
 #           - Extracts the tempo
 #           - Extracts additional metadata (length, genre, song name, artist)
 #       - Stores above information in arrays
@@ -12,11 +12,12 @@
 ##################################################
 # Load general libraries
 import os
-from multiprocessing import Process, JoinableQueue
+from multiprocessing import Process, JoinableQueue, Value, Lock
 import logging
 import psutil
 import time
 import csv
+from sklearn import preprocessing
 
 # Load librosa for audio processing
 from librosa import load, feature
@@ -32,15 +33,21 @@ itunes_dir = r'/Users/chiwang/Documents/iTunes 20160601 copy/iTunes Media/Music/
 output_csv = r'features.csv'
 
 # Number of workers to parallelize with multiprocessing
-# num_workers = 1
+num_workers = 2
 q = JoinableQueue()
 
 # Set mp3 analysis constants
 min_song_length = 120
 librosa_load_offset = 45
-librosa_load_duration = 30
-num_mfcc_coefficients = 5
+librosa_load_duration = 15
+num_mfcc_coefficients = 10
 max_mfcc_frequency = 8000
+
+# The error counter tracks the number of errors that occured within a process that caused the process to die (e.g.
+#   unicode encoding error), we have to use the Value() and Lock() functions from multiprocessing to ensure a shared
+#   counter is being successfully updated by all processes simultaneously
+error_counter = Value('i', 0)
+lock = Lock()
 
 ##################################################
 # Set up logging config
@@ -96,8 +103,8 @@ class Song:
         eyed3_mp3_obj = eyed3.load(unicode(file_path, 'utf-8'))
 
         # Return metadata
-        return eyed3_mp3_obj.tag.title, \
-               eyed3_mp3_obj.tag.artist, \
+        return eyed3_mp3_obj.tag.title.encode('utf-8'), \
+               eyed3_mp3_obj.tag.artist.encode('utf-8'), \
                eyed3_mp3_obj.tag.genre.name, \
                eyed3_mp3_obj.info.time_secs
 
@@ -107,17 +114,14 @@ class Song:
 
         # Extract MFCC and format to be a single array of features (each MFCC is returned as an array, so we get an
         #   array of arrays where we only want a single array)
-        mfcc = feature.mfcc(y = y, n_mfcc = num_mfcc_coefficients, fmax = max_mfcc_frequency)
-        mfcc_flat = flatten_list(mfcc)
+        mfcc = feature.mfcc(y = y, n_mfcc = num_mfcc_coefficients, fmax = max_mfcc_frequency).T
+
+        # Scale the coefficients to mean zero and unit variance
+        mfcc_scaled = preprocessing.StandardScaler().fit_transform(mfcc)
+        logger.debug('Transposed MFCC shape is {}'.format(mfcc.shape))
 
         # Return flat list of MFCCs
-        return mfcc_flat
-
-##################################################
-# Define simple utility functions
-##################################################
-def flatten_list(list):
-    return [item for sublist in list for item in sublist]
+        return mfcc_scaled
 
 ##################################################
 # Set up queueing and multiprocessing functionality, create worker function processor_job to extract features
@@ -143,16 +147,18 @@ def processor_job(worker):
         total_time_elapsed = time.time() - start_time
 
         # As songs are analyzed, save the results in a text file
-        logger.debug('Analyzed outputs: {}, {}, {}, {}, {}'.format(song.mp3_title, song.mp3_artist, song.mp3_genre, song.mp3_length, len(song.mfcc_flat)))
-        song_result = [current_song_counter, num_workers, psutil.cpu_percent(), psutil.virtual_memory()[2], total_time_elapsed, song.mp3_title, song.mp3_artist, song.mp3_genre, song.mp3_length]
-        # song_result.extend(song.mfcc_flat[2:])
-        with open(output_csv, 'a') as f:
-            writer = csv.writer(f)
-            writer.writerow(song_result)
+        # logger.debug('Analyzed outputs: {}, {}, {}, {}, {}'.format(song.mp3_title, song.mp3_artist, song.mp3_genre, song.mp3_length, len(song.mfcc_flat)))
+        for mfcc_array in song.mfcc_flat:
+            song_result = [current_song_counter, song.mp3_title, song.mp3_artist, song.mp3_genre]
+            song_result.extend([ '%.5f' % x for x in mfcc_array])
+            with open(output_csv, 'a') as f:
+                writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+                writer.writerow(song_result)
+        # song_result = [current_song_counter, num_workers, psutil.cpu_percent(), psutil.virtual_memory()[2], total_time_elapsed, song.mp3_title, song.mp3_artist, song.mp3_genre, song.mp3_length]
 
 # Define a processor function which manages how many songs to analyze at once by pulling from the queue and processing
 #   it via processor_job
-def processor():
+def processor(error_counter, lock):
     while True:
         # Get a worker from the queue
         worker = q.get()
@@ -163,54 +169,55 @@ def processor():
 
         # Run the job with the available worker in the queue
         try:
-            logger.info('Analyzing song #{} / {}: {}'.format(current_song_counter, total_songs, file))
+            logger.info('Analyzing song #{} / {}: {} ({}% CPU, {}% MEM, {} errors so far)'.format(current_song_counter, total_songs, file, psutil.cpu_percent(), psutil.virtual_memory()[2], error_counter.value))
             processor_job(worker)
         except Exception as e:
-            logger.exception('Error occurred processing song')
+            # If an exception happened inside a process, we track the errors and increment the counter before exiting
+            with lock:
+                error_counter.value += 1
+            logger.exception('Error occurred processing song {}'.format(file))
         finally:
             # Job complete
             logger.debug('Finished analyzing {}'.format(file_path))
             q.task_done()
 
-for num_workers in [1, 2, 4, 8, 16, 32, 64]:
-    logger.info('Starting iteration with {} number of workers'.format(num_workers))
-    # Kick off processors of workers
-    for x in range(num_workers):
-        p = Process(target = processor)
+# Kick off processors of workers
+for x in range(num_workers):
+    p = Process(target = processor, args = (error_counter, lock))
 
-        # Classify process as a daemon so it dies when the main thread dies
-        p.daemon = True
+    # Classify process as a daemon so it dies when the main thread dies
+    p.daemon = True
 
-        # Processor goes into effect
-        p.start()
+    # Processor goes into effect
+    p.start()
 
-    ##################################################
-    # Loop through iTunes library
-    ##################################################
-    # Loop through iTunes library once to gather total number of songs for our reference
-    total_songs = 0
-    for root, dirs, files in os.walk(itunes_dir):
-        for file in files:
-            # Only look at mp3 files
-            if file[-3:] == 'mp3':
-                # Add 1 song to total_songs
-                total_songs += 1
+##################################################
+# Finally, the main function looping through iTunes library
+##################################################
+# Loop through iTunes library once to gather total number of songs for our reference
+total_songs = 0
+for root, dirs, files in os.walk(itunes_dir):
+    for file in files:
+        # Only look at mp3 files
+        if file[-3:] == 'mp3':
+            # Add 1 song to total_songs
+            total_songs += 1
 
-    # Define main function which iterates through iTunes library and adds songs to the multiprocessing queue
-    current_song_counter = 1
-    for root, dirs, files in os.walk(itunes_dir):
-        for file in files:
-            # Format file path
-            file_path = os.path.join(root, file)
+# Define main function which iterates through iTunes library and adds songs to the multiprocessing queue
+current_song_counter = 1
+for root, dirs, files in os.walk(itunes_dir):
+    for file in files:
+        # Format file path
+        file_path = os.path.join(root, file)
 
-            # Only look at mp3 files
-            if file_path[-3:] == 'mp3':
-                # Start multiprocessing and feed file path of song to worker
-                q.put([file_path, file, current_song_counter, total_songs, num_workers])
-                current_song_counter += 1
+        # Only look at mp3 files
+        if file_path[-3:] == 'mp3':
+            # Start multiprocessing and feed file path of song to worker
+            q.put([file_path, file, current_song_counter, total_songs, num_workers])
+            current_song_counter += 1
 
-        if current_song_counter > 200:
-            break
+    # if current_song_counter > 200:
+    #     break
 
-    # Wait until all processes terminate before proceeding
-    q.join()
+# Wait until all processes terminate before proceeding
+q.join()
